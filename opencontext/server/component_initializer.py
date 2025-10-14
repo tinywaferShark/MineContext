@@ -64,6 +64,7 @@ class ComponentInitializer:
     def initialize_capture_components(self, capture_manager: ContextCaptureManager) -> None:
         """Initialize context capture components."""
         capture_config = self.config.get("capture", {})
+        logger.debug(f"Capture configuration from global config: {capture_config}")
         if not capture_config or not capture_config.get("enabled", False):
             logger.info("Capture modules not found or not enabled in configuration")
             return
@@ -177,10 +178,12 @@ class ComponentInitializer:
     
     def initialize_consumption_components(self) -> ConsumptionManager:
         consumption_manager = ConsumptionManager()
-
-        # Start scheduled tasks (individual tasks controlled by their enabled flags)
+        
+        # Start scheduled tasks if configured
         content_generation_config = self.config.get("content_generation", {})
-        consumption_manager.start_scheduled_tasks(content_generation_config)
+        if content_generation_config.get("enabled", True) and content_generation_config.get("auto_start", True):
+            consumption_manager.start_scheduled_tasks(content_generation_config)
+            logger.info("Content generation scheduled tasks auto-started")
 
         logger.info("Context consumption components initialization complete")
         return consumption_manager

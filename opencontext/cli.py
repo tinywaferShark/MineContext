@@ -237,6 +237,13 @@ def _setup_logging(config_path: Optional[str]) -> None:
     GlobalConfig.get_instance().initialize(config_path)
 
     setup_logging(GlobalConfig.get_instance().get_config('logging'))
+    # Debug: log which config path is being used and important env vars
+    try:
+        cfg_path = GlobalConfig.get_instance().get_config_path()
+        logger.info(f"GlobalConfig using config file: {cfg_path}")
+        logger.debug(f"Environment WAYLAND_DISPLAY={os.environ.get('WAYLAND_DISPLAY')}, XDG_SESSION_TYPE={os.environ.get('XDG_SESSION_TYPE')}, XDG_CURRENT_DESKTOP={os.environ.get('XDG_CURRENT_DESKTOP')}")
+    except Exception:
+        pass
 
 def main() -> int:
     """Main entry point.

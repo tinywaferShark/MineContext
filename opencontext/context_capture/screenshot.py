@@ -11,6 +11,9 @@ Screenshot capture component for periodic screen capturing
 
 import os
 import threading
+import shutil
+import subprocess
+import tempfile
 from datetime import datetime
 from typing import Any, Dict, List
 from io import BytesIO
@@ -66,11 +69,97 @@ class ScreenshotCapture(BaseCaptureComponent):
         """
         try:
             # Try to import screenshot library
+            # Prefer mss on X11, but on Wayland mss may fail (XGetImage). We'll detect Wayland
+            # and prefer compositor tools like `grim` if available. Fall back to mss/pyscreenshot.
             try:
-                self._screenshot_lib = "mss"
-                logger.info("Using mss library for screenshots")
-            except ImportError:
-                logger.error("Unable to import mss screenshot library, please install mss")
+                # Allow explicit backend override from config
+                requested_backend = None
+                try:
+                    requested_backend = config.get("backend") if isinstance(config, dict) else None
+                except Exception:
+                    requested_backend = None
+
+                # basic detection: WAYLAND_DISPLAY env var indicates Wayland
+                if os.environ.get("WAYLAND_DISPLAY"):
+                    # On Wayland, check for portal-friendly or DE-specific tooling
+                    xdg_desktop = os.environ.get('XDG_CURRENT_DESKTOP', '') or os.environ.get('DESKTOP_SESSION', '')
+                    is_kde = False
+                    try:
+                        if xdg_desktop:
+                            is_kde = 'KDE' in xdg_desktop or 'plasma' in xdg_desktop.lower() or 'kwin' in xdg_desktop.lower()
+                    except Exception:
+                        is_kde = False
+
+                    # If user requested an explicit backend, try to honor it first
+                    if requested_backend:
+                        if requested_backend == 'spectacle' and shutil.which('spectacle'):
+                            self._screenshot_lib = 'spectacle'
+                            logger.info("Using requested backend: spectacle")
+                        elif requested_backend == 'grimblast' and shutil.which('grimblast'):
+                            self._screenshot_lib = 'grimblast'
+                            logger.info("Using requested backend: grimblast")
+                        elif requested_backend == 'grim' and shutil.which('grim'):
+                            self._screenshot_lib = 'grim'
+                            logger.info("Using requested backend: grim")
+                        elif requested_backend == 'mss':
+                            try:
+                                import mss  # type: ignore
+                                self._screenshot_lib = 'mss'
+                                logger.info("Using requested backend: mss")
+                            except Exception:
+                                logger.error("Requested backend 'mss' not available")
+                        elif requested_backend == 'pyscreenshot':
+                            try:
+                                import pyscreenshot  # type: ignore
+                                self._screenshot_lib = 'pyscreenshot'
+                                logger.info("Using requested backend: pyscreenshot")
+                            except Exception:
+                                logger.error("Requested backend 'pyscreenshot' not available")
+                        else:
+                            logger.debug(f"Requested screenshot backend '{requested_backend}' not recognized or unavailable, falling back to auto-detect")
+
+                    # Auto-detect preferred backends on Wayland (only if not already set)
+                    if not self._screenshot_lib:
+                        if is_kde and shutil.which('spectacle'):
+                            self._screenshot_lib = 'spectacle'
+                            logger.info("Using spectacle for screenshots on KDE Wayland")
+                        elif shutil.which("grimblast"):
+                            self._screenshot_lib = "grimblast"
+                            logger.info("Using grimblast for screenshots on Wayland (portal-backed)")
+                        elif shutil.which("grim"):
+                            self._screenshot_lib = "grim"
+                            logger.info("Using grim for screenshots on Wayland")
+                        else:
+                            # fallback to mss if installed, otherwise pyscreenshot
+                            try:
+                                import mss  # type: ignore
+                                self._screenshot_lib = "mss"
+                                logger.info("Wayland detected but using mss as fallback (may fail)")
+                            except Exception:
+                                try:
+                                    import pyscreenshot  # type: ignore
+                                    self._screenshot_lib = "pyscreenshot"
+                                    logger.info("Using pyscreenshot fallback on Wayland")
+                                except Exception:
+                                    logger.error("No suitable screenshot backend found for Wayland. Install 'grim' or 'pyscreenshot'.")
+                                    return False
+                else:
+                    # Prefer mss on non-Wayland systems (X11)
+                    try:
+                        import mss  # type: ignore
+                        self._screenshot_lib = "mss"
+                        logger.info("Using mss library for screenshots")
+                    except Exception:
+                        # fallback to pyscreenshot
+                        try:
+                            import pyscreenshot  # type: ignore
+                            self._screenshot_lib = "pyscreenshot"
+                            logger.info("mss not available, using pyscreenshot")
+                        except Exception:
+                            logger.error("Unable to import screenshot libraries (mss or pyscreenshot). Please install one of them.")
+                            return False
+            except Exception as e:
+                logger.exception(f"Failed to determine screenshot backend: {e}")
                 return False
             
             # Set screenshot format
@@ -112,7 +201,26 @@ class ScreenshotCapture(BaseCaptureComponent):
             # Set image scaling size and quality
             self._max_image_size = config.get("max_image_size", 2048)
             self._resize_quality = config.get("resize_quality", 95)
-            
+
+            # Helpful startup debug: log requested backend and availability of common tools
+            try:
+                tool_checks = {
+                    'spectacle': bool(shutil.which('spectacle')),
+                    'grimblast': bool(shutil.which('grimblast')),
+                    'grim': bool(shutil.which('grim')),
+                    'mss_installed': False,
+                }
+                try:
+                    import mss  # type: ignore
+                    tool_checks['mss_installed'] = True
+                except Exception:
+                    tool_checks['mss_installed'] = False
+
+                logger.info(f"Screenshot backend selected: {self._screenshot_lib} (requested: {requested_backend}); tools: {tool_checks}")
+            except Exception:
+                # Non-fatal - keep initialization
+                pass
+
             return True
         except Exception as e:
             logger.exception(f"Failed to initialize screenshot capture component: {str(e)}")
@@ -202,6 +310,10 @@ class ScreenshotCapture(BaseCaptureComponent):
             List[RawContextProperties]: List of captured context data
         """
         try:
+            # Debug: log environment and chosen backend to help diagnose mss vs Wayland issues
+            logger.debug(f"Environment WAYLAND_DISPLAY={os.environ.get('WAYLAND_DISPLAY')}, XDG_SESSION_TYPE={os.environ.get('XDG_SESSION_TYPE')}")
+            logger.debug(f"Selected screenshot backend: {self._screenshot_lib}")
+
             screenshots = self._take_screenshot()
             if not screenshots:
                 return []
@@ -232,27 +344,105 @@ class ScreenshotCapture(BaseCaptureComponent):
             screenshots = []
             
             if self._screenshot_lib == "mss":
-                import mss
-                from PIL import Image
-                
-                with mss.mss() as sct:
-                    monitors_to_capture = []
-                    if self._screenshot_region:
-                        monitors_to_capture.append({
-                            "left": self._screenshot_region[0],
-                            "top": self._screenshot_region[1],
-                            "width": self._screenshot_region[2] - self._screenshot_region[0],
-                            "height": self._screenshot_region[3] - self._screenshot_region[1]
-                        })
-                    else:
-                        # sct.monitors[0] is all monitors, [1:] are individuals
-                        monitors_to_capture.extend(sct.monitors[1:])
+                try:
+                    import mss
+                    # Use module-level PIL Image import (avoid local import to prevent UnboundLocalError)
 
-                    for i, monitor in enumerate(monitors_to_capture):
-                        sct_img = sct.grab(monitor)
-                        img = Image.frombytes("RGB", sct_img.size, sct_img.bgra, "raw", "BGRX")
-                        
-                        # Convert to binary data
+                    mss_failed = False
+                    with mss.mss() as sct:
+                        monitors_to_capture = []
+                        if self._screenshot_region:
+                            monitors_to_capture.append({
+                                "left": self._screenshot_region[0],
+                                "top": self._screenshot_region[1],
+                                "width": self._screenshot_region[2] - self._screenshot_region[0],
+                                "height": self._screenshot_region[3] - self._screenshot_region[1]
+                            })
+                        else:
+                            # sct.monitors[0] is all monitors, [1:] are individuals
+                            monitors_to_capture.extend(sct.monitors[1:])
+
+                        for i, monitor in enumerate(monitors_to_capture):
+                            try:
+                                sct_img = sct.grab(monitor)
+                            except Exception as e:
+                                # Common failure on Wayland/Xorg mismatch: XGetImage
+                                logger.warning(f"mss grab failed for monitor {i}: {e}")
+                                mss_failed = True
+                                break
+
+                            img = Image.frombytes("RGB", sct_img.size, sct_img.bgra, "raw", "BGRX")
+
+                            # Convert to binary data
+                            buffer = BytesIO()
+                            if self._screenshot_format in ["jpg", "jpeg"]:
+                                img.save(buffer, format="JPEG", quality=self._screenshot_quality)
+                                format_name = "jpeg"
+                            else:
+                                img.save(buffer, format="PNG")
+                                format_name = "png"
+
+                            details = {"monitor": f"monitor_{i+1}", "coordinates": monitor}
+                            screenshots.append((buffer.getvalue(), format_name, details))
+
+                    if mss_failed:
+                        logger.warning("mss failed during capture; falling back to other backends")
+                        # do not return; allow fallback logic below to run
+                except Exception as e:
+                    # If mss fails immediately (import or other), attempt fallback
+                    logger.warning(f"mss failed to initialize or capture: {e}. Attempting fallback capture methods.")
+                    # fall through to try other backends
+
+            if self._screenshot_lib == "grim" or (self._screenshot_lib != "mss" and self._screenshot_lib == "grim"):
+                # use grim command-line tool to capture full screen or region
+                try:
+                    # grim writes PNG to stdout if given '-'
+                    cmd = ["grim", "-"]
+                    if self._screenshot_region:
+                        left, top, right, bottom = self._screenshot_region
+                        width = right - left
+                        height = bottom - top
+                        # grim supports geometry as WxH+X+Y
+                        geom = f"{width}x{height}+{left}+{top}"
+                        cmd = ["grim", "-g", geom, "-"]
+
+                    p = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=True)
+                    img = Image.open(BytesIO(p.stdout)).convert("RGB")
+                    buffer = BytesIO()
+                    if self._screenshot_format in ["jpg", "jpeg"]:
+                        img.save(buffer, format="JPEG", quality=self._screenshot_quality)
+                        format_name = "jpeg"
+                    else:
+                        img.save(buffer, format="PNG")
+                        format_name = "png"
+                    details = {"monitor": "monitor_1", "coordinates": self._screenshot_region or {}}
+                    screenshots.append((buffer.getvalue(), format_name, details))
+                    return screenshots
+                except subprocess.CalledProcessError as e:
+                    # Include stderr from grim to help debugging
+                    try:
+                        stderr_text = e.stderr.decode('utf-8', errors='replace') if e.stderr else ''
+                    except Exception:
+                        stderr_text = str(e)
+                    logger.error(f"grim capture failed (returncode={e.returncode}): {stderr_text}")
+
+                    # Some grim builds don't support stdout; try writing to a temporary file instead
+                    try:
+                        with tempfile.NamedTemporaryFile(suffix='.png', delete=False) as tmpf:
+                            tmp_path = tmpf.name
+                        cmd_file = ["grim", tmp_path]
+                        if self._screenshot_region:
+                            left, top, right, bottom = self._screenshot_region
+                            width = right - left
+                            height = bottom - top
+                            geom = f"{width}x{height}+{left}+{top}"
+                            cmd_file = ["grim", "-g", geom, tmp_path]
+
+                        subprocess.run(cmd_file, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=True)
+                        # Read file back
+                        with open(tmp_path, 'rb') as f:
+                            data = f.read()
+                        img = Image.open(BytesIO(data)).convert("RGB")
                         buffer = BytesIO()
                         if self._screenshot_format in ["jpg", "jpeg"]:
                             img.save(buffer, format="JPEG", quality=self._screenshot_quality)
@@ -260,12 +450,163 @@ class ScreenshotCapture(BaseCaptureComponent):
                         else:
                             img.save(buffer, format="PNG")
                             format_name = "png"
-                        
-                        details = {"monitor": f"monitor_{i+1}", "coordinates": monitor}
+                        details = {"monitor": "monitor_1", "coordinates": self._screenshot_region or {}}
                         screenshots.append((buffer.getvalue(), format_name, details))
+                        try:
+                            os.remove(tmp_path)
+                        except Exception:
+                            pass
+                        return screenshots
+                    except subprocess.CalledProcessError as e2:
+                        try:
+                            stderr_text2 = e2.stderr.decode('utf-8', errors='replace') if e2.stderr else ''
+                        except Exception:
+                            stderr_text2 = str(e2)
+                        logger.error(f"grim fallback to file failed (returncode={getattr(e2, 'returncode', 'N/A')}): {stderr_text2}")
+                    except Exception as e3:
+                        logger.exception(f"grim fallback to file capture failed: {e3}")
+                except Exception as e:
+                    logger.exception(f"grim capture failed: {e}")
+
+            if self._screenshot_lib == "spectacle" or (self._screenshot_lib != "mss" and self._screenshot_lib == "spectacle"):
+                # Use KDE's spectacle tool which integrates with KWin/portal on Wayland
+                try:
+                    # spectacle CLI supports writing to file: spectacle -b -n -o <file>
+                    with tempfile.NamedTemporaryFile(suffix='.png', delete=False) as tmpf:
+                        tmp_path = tmpf.name
+
+                    cmd = ["spectacle", "-b", "-n", "-o", tmp_path]
+                    if self._screenshot_region:
+                        left, top, right, bottom = self._screenshot_region
+                        width = right - left
+                        height = bottom - top
+                        geom = f"{width}x{height}+{left}+{top}"
+                        # spectacle does not take geometry in all versions; skip if unsupported
+
+                    p = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+                    if p.returncode != 0:
+                        try:
+                            stderr_text = p.stderr.decode('utf-8', errors='replace') if p.stderr else ''
+                        except Exception:
+                            stderr_text = str(p)
+                        logger.error(f"spectacle capture failed (returncode={p.returncode}): {stderr_text}")
+                    else:
+                        with open(tmp_path, 'rb') as f:
+                            data = f.read()
+                        img = Image.open(BytesIO(data)).convert("RGB")
+                        buffer = BytesIO()
+                        if self._screenshot_format in ["jpg", "jpeg"]:
+                            img.save(buffer, format="JPEG", quality=self._screenshot_quality)
+                            format_name = "jpeg"
+                        else:
+                            img.save(buffer, format="PNG")
+                            format_name = "png"
+                        details = {"monitor": "monitor_1", "coordinates": self._screenshot_region or {}}
+                        screenshots.append((buffer.getvalue(), format_name, details))
+                        try:
+                            os.remove(tmp_path)
+                        except Exception:
+                            pass
+                        return screenshots
+                except Exception as e:
+                    logger.exception(f"spectacle capture failed: {e}")
+
+            if self._screenshot_lib == "grimblast" or (self._screenshot_lib != "mss" and self._screenshot_lib == "grimblast"):
+                # grimblast uses xdg-desktop-portal; try to capture via stdout or temp file
+                try:
+                    cmd = ["grimblast", "--stdout"]
+                    if self._screenshot_region:
+                        left, top, right, bottom = self._screenshot_region
+                        width = right - left
+                        height = bottom - top
+                        geom = f"{width}x{height}+{left}+{top}"
+                        cmd = ["grimblast", "--geometry", geom, "--stdout"]
+
+                    p = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=True)
+                    img = Image.open(BytesIO(p.stdout)).convert("RGB")
+                    buffer = BytesIO()
+                    if self._screenshot_format in ["jpg", "jpeg"]:
+                        img.save(buffer, format="JPEG", quality=self._screenshot_quality)
+                        format_name = "jpeg"
+                    else:
+                        img.save(buffer, format="PNG")
+                        format_name = "png"
+                    details = {"monitor": "monitor_1", "coordinates": self._screenshot_region or {}}
+                    screenshots.append((buffer.getvalue(), format_name, details))
+                    return screenshots
+                except subprocess.CalledProcessError as e:
+                    try:
+                        stderr_text = e.stderr.decode('utf-8', errors='replace') if e.stderr else ''
+                    except Exception:
+                        stderr_text = str(e)
+                    logger.error(f"grimblast capture failed (returncode={getattr(e,'returncode', 'N/A')}): {stderr_text}")
+
+                    # try tempfile fallback
+                    try:
+                        with tempfile.NamedTemporaryFile(suffix='.png', delete=False) as tmpf:
+                            tmp_path = tmpf.name
+                        cmd_file = ["grimblast", "--output", tmp_path]
+                        if self._screenshot_region:
+                            left, top, right, bottom = self._screenshot_region
+                            width = right - left
+                            height = bottom - top
+                            geom = f"{width}x{height}+{left}+{top}"
+                            cmd_file = ["grimblast", "--geometry", geom, "--output", tmp_path]
+
+                        subprocess.run(cmd_file, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=True)
+                        with open(tmp_path, 'rb') as f:
+                            data = f.read()
+                        img = Image.open(BytesIO(data)).convert("RGB")
+                        buffer = BytesIO()
+                        if self._screenshot_format in ["jpg", "jpeg"]:
+                            img.save(buffer, format="JPEG", quality=self._screenshot_quality)
+                            format_name = "jpeg"
+                        else:
+                            img.save(buffer, format="PNG")
+                            format_name = "png"
+                        details = {"monitor": "monitor_1", "coordinates": self._screenshot_region or {}}
+                        screenshots.append((buffer.getvalue(), format_name, details))
+                        try:
+                            os.remove(tmp_path)
+                        except Exception:
+                            pass
+                        return screenshots
+                    except subprocess.CalledProcessError as e2:
+                        try:
+                            stderr_text2 = e2.stderr.decode('utf-8', errors='replace') if e2.stderr else ''
+                        except Exception:
+                            stderr_text2 = str(e2)
+                        logger.error(f"grimblast fallback to file failed (returncode={getattr(e2,'returncode','N/A')}): {stderr_text2}")
+                    except Exception as e3:
+                        logger.exception(f"grimblast fallback to file capture failed: {e3}")
+                except Exception as e:
+                    logger.exception(f"grimblast capture failed: {e}")
+
+            if self._screenshot_lib == "pyscreenshot" or (self._screenshot_lib != "mss" and self._screenshot_lib == "pyscreenshot"):
+                try:
+                    import pyscreenshot as ImageGrab  # type: ignore
+                    # pyscreenshot grabs the whole screen or a bbox tuple
+                    if self._screenshot_region:
+                        left, top, right, bottom = self._screenshot_region
+                        img = ImageGrab.grab(bbox=(left, top, right, bottom))
+                    else:
+                        img = ImageGrab.grab()
+                    buffer = BytesIO()
+                    if self._screenshot_format in ["jpg", "jpeg"]:
+                        img.save(buffer, format="JPEG", quality=self._screenshot_quality)
+                        format_name = "jpeg"
+                    else:
+                        img.save(buffer, format="PNG")
+                        format_name = "png"
+                    details = {"monitor": "monitor_1", "coordinates": self._screenshot_region or {}}
+                    screenshots.append((buffer.getvalue(), format_name, details))
+                    return screenshots
+                except Exception as e:
+                    logger.exception(f"pyscreenshot capture failed: {e}")
             
-            else:
-                logger.error(f"Unsupported screenshot library: {self._screenshot_lib}")
+            # If we reached here and no screenshots were captured, report and return empty
+            if not screenshots:
+                logger.error(f"Unsupported or failed screenshot library: {self._screenshot_lib}")
                 return []
             
             return screenshots
@@ -300,6 +641,12 @@ class ScreenshotCapture(BaseCaptureComponent):
                     "minimum": 1,
                     "maximum": 100,
                     "default": 80
+                },
+                "backend": {
+                    "type": "string",
+                    "description": "Preferred screenshot backend (spectacle, grimblast, grim, mss, pyscreenshot)",
+                    "enum": ["spectacle", "grimblast", "grim", "mss", "pyscreenshot"],
+                    "default": None
                 },
                 "screenshot_region": {
                     "type": "object",
