@@ -112,11 +112,10 @@ const CustomFormItems = () => {
   )
 }
 
-// 1. Add showCheckIcon state
 const Settings: FC<Props> = (props: Props) => {
   const { onOk } = props
   const [init, setInit] = useState<undefined | boolean>(undefined)
-  const [showCheckIcon, setShowCheckIcon] = useState(false)
+  // const [setShowCheckIcon] = useState(false)
   const [errorMessage, setErrorMessage] = useState<string | null>(null)
   const [successMessage, setSuccessMessage] = useState<string | null>(null)
   const [isLoading, setIsLoading] = useState(false)
@@ -194,11 +193,11 @@ const Settings: FC<Props> = (props: Props) => {
       setSuccessMessage('Your API key saved successfully')
 
       // 显示检查图标
-      setShowCheckIcon(true)
+      // setShowCheckIcon(true)
 
       // 3秒后隐藏检查图标和成功消息
       setTimeout(() => {
-        setShowCheckIcon(false)
+        // setShowCheckIcon(false)
         setSuccessMessage(null)
       }, 3000)
 

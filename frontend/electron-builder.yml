@@ -12,8 +12,8 @@ files:
   - '!{.env,.env.*,.npmrc,pnpm-lock.yaml}'
   - '!{tsconfig.json,tsconfig.node.json,tsconfig.web.json}'
 extraResources:
-  - from: backend/main
-    to: backend/main
+  - from: ../dist/main   # 从 frontend/ 回退一级到 MineContext/，再进入 dist/main
+    to: backend/main     # 最终在应用包中的 resources/backend/main
   - from: backend/config/
     to: backend/config/
     filter:

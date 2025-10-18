@@ -14,7 +14,7 @@ import { useAllotment } from '@renderer/hooks/use-allotment'
 import AIToggleButton from '@renderer/components/ai-toggle-button'
 import AIAssistant from '@renderer/components/ai-assistant'
 import { removeMarkdownSymbols } from '@renderer/utils/vault'
-import './vault.css'
+import './Vault.css'
 
 const VaultPage = () => {
   const [searchParams] = useSearchParams()
