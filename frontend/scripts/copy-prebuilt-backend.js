@@ -9,14 +9,18 @@ console.log('📦 Copying pre-built backend executable...')
 // Setup paths
 const backendDir = path.join(__dirname, '..', 'backend')
 const sourceDir = path.join(__dirname, '..', '..')
-const executableName = 'main'
+const executableName = process.platform === 'win32' ? 'main.exe' : 'main'
 const sourceExecutablePath = path.join(sourceDir, 'dist', executableName)
 const destExecutablePath = path.join(backendDir, executableName)
 
-// Ensure backend directory exists
-if (!fs.existsSync(backendDir)) {
-  fs.mkdirSync(backendDir, { recursive: true })
+// Clean up existing backend directory
+if (fs.existsSync(backendDir)) {
+  console.log('🧹 Cleaning up existing backend directory...')
+  fs.rmSync(backendDir, { recursive: true, force: true })
 }
+
+// Ensure backend directory exists
+fs.mkdirSync(backendDir, { recursive: true })
 
 // Check if pre-built executable exists
 if (!fs.existsSync(sourceExecutablePath)) {
